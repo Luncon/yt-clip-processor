@@ -17,6 +17,7 @@ all = ["yt-dlp", "faster-whisper", "mediapipe", "opencv-python", "numpy", "scipy
 
 [project.scripts]
 yt-clip-processor = "yt_clip_processor.cli:main"
+yt-clip-monitor = "yt_clip_processor.monitor:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

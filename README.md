@@ -32,6 +32,32 @@ Uniform mode cuts consecutive clips. `--hooks N` transcribes the source and
 selects up to N candidate moments before rendering them. Run
 `yt-clip-processor --help` for the full option list.
 
+## Monitor source uploads
+
+The pilot monitor follows Tucker Carlson, Candace Owens, Hasan Piker's
+HasanAbi channel, and Fox News on YouTube. Create a YouTube Data API key, set
+it locally, and run the monitor every few hours:
+
+```sh
+export YOUTUBE_API_KEY='your-key-here'
+yt-clip-monitor
+yt-clip-monitor --report-only
+```
+
+If the package is not installed, run
+`PYTHONPATH=src python -m yt_clip_processor.monitor` from the repository root.
+The monitor saves video
+details and dated view, like, and comment counts in
+`output/source-monitor.sqlite3` (ignored by Git). On the first run, view growth
+is `n/a`; later runs show the difference in views per hour between the two most
+recent observations. This is source evidence, not an automatic clip choice.
+
+Use `--max-videos 50` to inspect more recent uploads per channel, `--db PATH`
+to choose a database, or `--sources PATH` for a JSON array such as
+`[{"name":"Example","handle":"@Example"}]`. The key is read only from the
+environment and is not saved in the database. The monitor does not download
+videos or publish clips.
+
 Local inputs are read in place. Uniform clips with subtitles are cut and
 subtitled in one final encode per clip after any vertical reframing.
 
