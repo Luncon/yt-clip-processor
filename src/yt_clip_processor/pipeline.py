@@ -1,13 +1,14 @@
 """Orchestrate video processing while owning only run-specific files."""
 
 import json
+import os
 import shutil
 import tempfile
 from pathlib import Path
-from .faces import sample_face_timestamps
 from .framing import reframe_to_vertical
 from .hooks import _print_hook_summary, _words_in_range, find_hook_clips
 from .media import _get_duration, _run_ffmpeg, trim_video
+from .semantic import semantic_scores
 from .sources import download_video
 from .subtitles import _resolve_font, burn_subtitles
 from .titles import generate_clip_title
@@ -199,22 +200,29 @@ def cut_into_clips(video_path: Path, clip_length: int, clips_dir: Path,
 
 def _run_hooks(args, video_path, work_dir, clips_dir, allowed_modes, font):
     words = transcribe_audio_only(video_path, args.whisper_model, work_dir)
-    face_times = None
-    if not args.no_vertical:
-        face_times = sample_face_timestamps(video_path, sample_every_sec=1.0)
     hooks = find_hook_clips(
         words,
         n_hooks=args.hooks,
         clip_length=args.hook_clip_length,
-        face_timestamps=face_times if face_times else None,
+        min_score=args.min_auto_score,
+        semantic_scorer=(semantic_scores if os.environ.get("GROQ_API_KEY")
+                         and not args.no_semantic_rank else None),
     )
     _print_hook_summary(hooks)
+    manifest = {
+        "source": args.source_decision or {"url": args.url, "reason": "explicit input"},
+        "requested_clips": args.hooks,
+        "minimum_score": args.min_auto_score,
+        "clips": [],
+    }
     if not hooks:
-        print("No hook candidates found.")
+        (clips_dir / "selection.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        print("No clips passed the automatic quality threshold.")
         return 0
 
     completed = 0
     for index, hook in enumerate(hooks, 1):
+        decision = {key: value for key, value in hook.items() if key != "clip_text"}
         title = generate_clip_title(
             hook.get("clip_text") or hook.get("hook_preview", ""),
             use_llm=not args.no_llm_titles,
@@ -236,11 +244,17 @@ def _run_hooks(args, video_path, work_dir, clips_dir, allowed_modes, font):
                 allowed_modes=allowed_modes,
             )
             completed += 1
+            decision["file"] = clip_path.name
+            decision["status"] = "rendered"
             print(f"Saved {clip_path}")
         except Exception as exc:
+            decision["status"] = "failed"
+            decision["error"] = str(exc)
             print(f"Hook {index} failed: {exc}")
         finally:
+            manifest["clips"].append(decision)
             shutil.rmtree(segment_dir, ignore_errors=True)
+    (clips_dir / "selection.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     if not completed:
         raise RuntimeError("All selected hooks failed to render")
     return completed

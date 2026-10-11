@@ -20,12 +20,12 @@ def _sanitize_filename(text: str, max_len: int = 60) -> str:
 _GROQ_LAST_CALL_TS = [0.0]     # module-level mutable box: last successful call time
 
 
-_GROQ_MIN_INTERVAL = 2.2       # seconds between calls — keeps us safely under 30 req/min
+_GROQ_MIN_INTERVAL = 2.2       # avoid bursts of title requests
 
 
 def _groq_generate_title(text: str, max_words: int = 8) -> str:
     """
-    Ask a free Groq-hosted LLM (llama-3.1-8b-instant) for a short, punchy
+    Ask a Groq-hosted LLM for a short, punchy
     TikTok-style title summarizing this clip's transcript — an actual
     summary rather than just the leading words.
 
@@ -65,9 +65,10 @@ def _groq_generate_title(text: str, max_words: int = 8) -> str:
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={
-                "model": "llama-3.1-8b-instant",
+                "model": "openai/gpt-oss-20b",
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 30,
+                "max_tokens": 100,
+                "reasoning_effort": "low",
                 "temperature": 0.5,
             },
             timeout=15,

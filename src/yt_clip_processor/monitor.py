@@ -132,14 +132,14 @@ def poll(db, client, sources, observed_at, limit=25):
 
 def report(db, limit=100):
     rows = db.execute("""
-        SELECT v.video_id, v.source_name, v.title, v.published_at,
+        SELECT v.video_id, v.source_name, v.title, v.published_at, v.duration,
                o.observed_at, o.views, o.likes, o.comments
         FROM videos v JOIN observations o ON o.video_id = v.video_id
         WHERE o.id = (SELECT MAX(o2.id) FROM observations o2 WHERE o2.video_id = v.video_id)
         ORDER BY v.published_at DESC LIMIT ?
     """, (limit,)).fetchall()
     result = []
-    for video_id, source, title, published, observed, views, likes, comments in rows:
+    for video_id, source, title, published, duration, observed, views, likes, comments in rows:
         age_hours = (datetime.fromisoformat(observed) -
                      datetime.fromisoformat(published.replace("Z", "+00:00"))).total_seconds() / 3600
         previous = db.execute("""
@@ -153,7 +153,9 @@ def report(db, limit=100):
                      datetime.fromisoformat(previous[0])).total_seconds() / 3600
             if hours > 0:
                 hourly_growth = (views - previous[1]) / hours
-        result.append({"source": source, "title": title, "published_at": published,
+        result.append({"video_id": video_id, "source": source, "title": title,
+                       "published_at": published, "duration": duration,
+                       "observed_at": observed,
                        "url": f"https://www.youtube.com/watch?v={video_id}",
                        "age_hours": max(0, age_hours),
                        "views": views, "likes": likes, "comments": comments,

@@ -2,6 +2,7 @@
 
 import contextlib
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -15,6 +16,21 @@ from yt_clip_processor.cli import parse_args
 
 
 class HookPipelineTests(unittest.TestCase):
+    def test_no_candidate_writes_empty_selection_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            source.write_bytes(b"source")
+            args = parse_args([str(source), "--output", str(root / "output"),
+                               "--auto-clips", "4", "--no-vertical"])
+            with (patch.object(pipeline, "transcribe_audio_only", return_value=[]),
+                  patch.object(pipeline, "find_hook_clips", return_value=[]),
+                  contextlib.redirect_stdout(io.StringIO())):
+                clips_dir = pipeline.run(args)
+            manifest = json.loads((clips_dir / "selection.json").read_text())
+            self.assertEqual(manifest["clips"], [])
+            self.assertEqual(manifest["requested_clips"], 4)
+
     def test_hook_run_writes_selected_clip_and_cleans_workdir(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -45,6 +61,9 @@ class HookPipelineTests(unittest.TestCase):
                 clips_dir = pipeline.run(args)
 
             self.assertEqual((clips_dir / "01_title.mp4").read_bytes(), b"rendered clip")
+            manifest = json.loads((clips_dir / "selection.json").read_text())
+            self.assertEqual(manifest["clips"][0]["status"], "rendered")
+            self.assertEqual(manifest["clips"][0]["start_sec"], 0.0)
             self.assertEqual(list((output / ".work").iterdir()), [])
 
 

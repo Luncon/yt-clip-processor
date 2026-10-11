@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 from .pipeline import run
+from .source_selection import choose_monitored_source
 from .sources import is_youtube_url
 
 
@@ -16,7 +17,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Download YouTube video → transcribe → burn subs → cut into clips",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("url", help="YouTube video URL, or path to a local video file")
+    parser.add_argument("url", nargs="?", help="YouTube video URL or local video file")
+    parser.add_argument("--from-monitor", action="store_true",
+                        help="Choose a rising recent video from saved source monitor data")
+    parser.add_argument("--monitor-db", type=Path, default=Path("output/source-monitor.sqlite3"),
+                        help="Source monitor database (default: output/source-monitor.sqlite3)")
     parser.add_argument(
         "--output", "-o", default="./output",
         help="Base output directory (default: ./output)",
@@ -76,16 +81,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="End time for trimming (e.g. 00:02:00 or 120).",
     )
     parser.add_argument(
-        "--hooks", type=int, default=0, metavar="N",
+        "--auto-clips", "--hooks", dest="hooks", type=int, default=0, metavar="N",
         help=(
-            "Find the N highest-scoring hook starting points and cut one clip per hook. "
-            "Replaces uniform clip cutting. Example: --hooks 5"
+            "Automatically select up to N complete, distinct clips. "
+            "Replaces uniform cutting; --hooks is an older alias."
         ),
     )
     parser.add_argument(
-        "--hook-clip-length", type=int, default=120,
-        help="Length of each hook clip in seconds (default: 120). Used only with --hooks.",
+        "--auto-clip-length", "--hook-clip-length", dest="hook_clip_length", type=int,
+        metavar="SECONDS",
+        default=60, help="Target automatic clip length in seconds (default: 60)",
     )
+    parser.add_argument("--min-auto-score", type=int, default=65,
+                        help="Minimum automatic selection score, 0-100 (default: 65)")
+    parser.add_argument("--no-semantic-rank", action="store_true",
+                        help="Use only local scoring even when GROQ_API_KEY is set")
     parser.add_argument(
         "--single", action="store_true",
         help="Only look for single-person scenes (disables dual/reaction detection). "
@@ -116,10 +126,16 @@ def parse_args(argv=None):
         if getattr(args, name) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")
     if args.hooks < 0:
-        parser.error("--hooks cannot be negative")
+        parser.error("--auto-clips cannot be negative")
     if args.hooks and args.no_transcribe:
-        parser.error("--hooks requires transcription")
-    if not Path(args.url).expanduser().is_file() and not is_youtube_url(args.url):
+        parser.error("--auto-clips requires transcription")
+    if not 0 <= args.min_auto_score <= 100:
+        parser.error("--min-auto-score must be between 0 and 100")
+    if args.from_monitor and (args.url or not args.hooks or args.start or args.end):
+        parser.error("--from-monitor requires --auto-clips and no URL or trim range")
+    if not args.from_monitor and not args.url:
+        parser.error("provide a video URL or path, or use --from-monitor")
+    if args.url and not Path(args.url).expanduser().is_file() and not is_youtube_url(args.url):
         parser.error("source must be an existing file or a YouTube video URL")
     try:
         start = _seconds(args.start) if args.start is not None else 0.0
@@ -128,6 +144,7 @@ def parse_args(argv=None):
         parser.error("--start and --end must be seconds or MM:SS or HH:MM:SS")
     if start < 0 or (end is not None and end <= start):
         parser.error("trim range must have a nonnegative start and end after start")
+    args.source_decision = None
     return args
 
 
@@ -169,6 +186,13 @@ def check_dependencies(args):
 def main(argv=None):
     args = parse_args(argv)
     try:
+        if args.from_monitor:
+            args.source_decision = choose_monitored_source(
+                args.monitor_db, args.hook_clip_length, args.hooks)
+            args.url = args.source_decision["url"]
+            print(f"Selected {args.source_decision['source']}: "
+                  f"{args.source_decision['reason']}")
+            print(args.url)
         check_dependencies(args)
         run(args)
     except (RuntimeError, ValueError, OSError, subprocess.CalledProcessError) as exc:

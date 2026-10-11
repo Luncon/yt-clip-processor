@@ -32,6 +32,34 @@ Uniform mode cuts consecutive clips. `--hooks N` transcribes the source and
 selects up to N candidate moments before rendering them. Run
 `yt-clip-processor --help` for the full option list.
 
+For automatic selection without a review queue, use `--auto-clips` with a
+target length. The selector searches the full transcript for complete spoken
+windows, rejects sponsor reads and weak fragments, and renders up to the
+requested count. `--hooks` remains an alias for the new selector.
+If `GROQ_API_KEY` is set, it also assesses the meaning of shortlisted
+transcripts before ranking; if that service fails, local scores still work.
+Use `--no-semantic-rank` to keep selection local. Semantic ranking sends up to
+48 candidate transcripts to Groq and may use paid API quota.
+
+```sh
+yt-clip-processor 'https://www.youtube.com/watch?v=VIDEO_ID' --auto-clips 4 --auto-clip-length 60
+```
+
+To choose the source video automatically, poll the source monitor at least
+twice, then point the processor at its database:
+
+```sh
+yt-clip-processor --from-monitor --monitor-db output/source-monitor.sqlite3 \
+  --auto-clips 4 --auto-clip-length 60
+```
+
+The selected upload must be recent, rising, and long enough for the requested
+clips. If none qualifies, the run stops before downloading media. Each
+automatic run writes `selection.json` beside its clips with source and clip
+reasons, timestamps, scores, and render outcomes. Scores are transcript-based
+predictions, not measured short-form performance. Use `--min-auto-score` to
+adjust the quality threshold; the default is 65.
+
 ## Monitor source uploads
 
 The pilot monitor follows Tucker Carlson, Candace Owens, Hasan Piker's
