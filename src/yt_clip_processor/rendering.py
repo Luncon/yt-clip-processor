@@ -201,20 +201,32 @@ def _reframe_center_crop(video_path: Path, output_dir: Path) -> Path:
     return vertical_path
 
 
-def _fit_full_frame(frame, out_w: int, out_h: int):
-    """Fit a complete source frame on a vertical canvas without cropping it."""
+def _dual_crop_box(face: tuple, src_w: int, src_h: int) -> tuple:
+    """Give a dual-scene face room on both sides of the source midpoint."""
+    cx, cy, face_w, face_h = face
+    box_w = min(src_w, max(round(src_w * 0.56), round(face_w * 1.2)))
+    box_h = min(src_h, max(round(src_h * 0.896), round(face_h * 1.2)))
+    x1 = max(0, min(round(cx - box_w / 2), src_w - box_w))
+    y1 = max(0, min(round(cy - box_h / 2), src_h - box_h))
+    return x1, y1, x1 + box_w, y1 + box_h
+
+
+def _fit_centered_wide(frame, out_w: int, out_h: int):
+    """Enlarge a wide shot's center to occupy most of the portrait canvas."""
     import cv2
     import numpy as np
 
     src_h, src_w = frame.shape[:2]
-    scale = min(out_w / src_w, out_h / src_h)
-    width = max(1, min(out_w, round(src_w * scale)))
-    height = max(1, min(out_h, round(src_h * scale)))
+    scale = max(out_w / src_w, (out_h * 0.7) / src_h)
+    width = max(out_w, round(src_w * scale))
+    height = max(round(out_h * 0.7), round(src_h * scale))
     resized = cv2.resize(frame, (width, height), interpolation=cv2.INTER_LINEAR)
+    visible_h = min(height, out_h)
+    x = (width - out_w) // 2
+    y = (height - visible_h) // 2
     canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
-    x = (out_w - width) // 2
-    y = (out_h - height) // 2
-    canvas[y:y + height, x:x + width] = resized
+    top = (out_h - visible_h) // 2
+    canvas[top:top + visible_h] = resized[y:y + visible_h, x:x + out_w]
     return canvas
 
 
@@ -233,7 +245,7 @@ def render_split_screen(
     - Dual scenes:     stable split-screen (left face top, right face bottom)
     - Reaction scenes: split-screen (zoomed face bubble top, content bottom)
     - Single scenes:   full-frame face tracking
-    - Wide scenes:     fit the complete source frame when faces are absent
+    - Wide scenes:     enlarge the centered source view when faces are absent
     Faces are identified by X position (left=0, right=1) so they never swap.
     `scenes` must be the smoothed scene list from analyse_faces() — if omitted,
     falls back to raw face_data (legacy behaviour, prone to jump-cut flicker,
@@ -285,8 +297,8 @@ def render_split_screen(
     # ── Pre-compute anchor boxes for each dual scene ──
     # For each dual scene, find the first keyframe with two face detections and
     # lock a fixed crop box for each person for the entire scene.
-    # The box is centered on the detected face, clamped to that person's half
-    # of the source frame, and never moves again — like a news broadcast layout.
+    # The box is centered on the detected face, can cross the source midpoint,
+    # and never moves again — like a news broadcast layout with extra context.
     # Single-face scenes use the smooth tracking path (pos[]) instead.
     CROP_W_HALF = src_w // 2
     CROP_H_HALF = int(src_h * 0.8)
@@ -319,19 +331,17 @@ def render_split_screen(
                         continue
                     faces = face_data[kf]
                     if len(faces) == 2:
-                        cx0, cy0 = faces[0][0], faces[0][1]
-                        cx1, cy1 = faces[1][0], faces[1][1]
-                        # Face 0 lives in left half, face 1 in right half
-                        box0 = _make_box(cx0, cy0, CROP_W_HALF, CROP_H_HALF, 0,        src_w // 2)
-                        box1 = _make_box(cx1, cy1, CROP_W_HALF, CROP_H_HALF, src_w // 2, src_w)
+                        # Let both crops cross the midpoint so profiles stay visible.
+                        box0 = _dual_crop_box(faces[0], src_w, src_h)
+                        box1 = _dual_crop_box(faces[1], src_w, src_h)
                         anchor = {0: box0, 1: box1}
                         print(f"    📦  Anchor boxes set at frame {kf}: "
                               f"face0={box0[0]}-{box0[2]}px  face1={box1[0]}-{box1[2]}px")
                         break
                 if anchor is None:
                     # No clean dual frame — use left/right midpoints as fallback
-                    box0 = _make_box(src_w // 4,     src_h // 2, CROP_W_HALF, CROP_H_HALF, 0,          src_w // 2)
-                    box1 = _make_box(3 * src_w // 4, src_h // 2, CROP_W_HALF, CROP_H_HALF, src_w // 2, src_w)
+                    box0 = _dual_crop_box((src_w // 4, src_h // 2, 0, 0), src_w, src_h)
+                    box1 = _dual_crop_box((3 * src_w // 4, src_h // 2, 0, 0), src_w, src_h)
                     anchor = {0: box0, 1: box1}
                     print(f"    📦  Anchor boxes: no dual frame found, using midpoint fallback")
 
@@ -425,7 +435,7 @@ def render_split_screen(
             canvas[HALF_H:OUT_H] = cv2.resize(bot_crop, (OUT_W, HALF_H))
 
         elif mode == 'wide':
-            canvas = _fit_full_frame(frame, OUT_W, OUT_H)
+            canvas = _fit_centered_wide(frame, OUT_W, OUT_H)
 
         else:
             # ── SINGLE FACE: track face 0 (or whoever is present), full frame ──

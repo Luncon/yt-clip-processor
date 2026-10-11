@@ -60,6 +60,10 @@ reasons, timestamps, scores, and render outcomes. Scores are transcript-based
 predictions, not measured short-form performance. Use `--min-auto-score` to
 adjust the quality threshold; the default is 65.
 
+Vertical framing uses separate top and bottom panes for sustained two-person
+shots, with room around each face for profile views. Wide shots use a larger
+centered view of the source frame.
+
 ## Monitor source uploads
 
 The pilot monitor follows Tucker Carlson, Candace Owens, Hasan Piker's
