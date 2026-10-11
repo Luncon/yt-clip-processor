@@ -44,6 +44,26 @@ class HookSelectionTests(unittest.TestCase):
                 pipeline._run_uniform(args, source, root, root / "clips", {"single"}, "Arial")
             transcribe.assert_called_once_with(source, args.whisper_model, root)
 
+    def test_hook_segment_passes_relative_speech_times_to_reframing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            source.write_bytes(b"source")
+            destination = root / "clip.mp4"
+
+            def fake_trim(command, quiet):
+                Path(command[-1]).write_bytes(b"segment")
+
+            with (patch.object(pipeline, "_run_ffmpeg", side_effect=fake_trim),
+                  patch.object(pipeline, "reframe_to_vertical",
+                               side_effect=lambda path, *args, **kwargs: (path, None)) as reframe):
+                pipeline.process_hook_segment(
+                    source, {"start_sec": 100, "end_sec": 105}, root / "segment",
+                    destination, [{"word": "hello", "start": 100.5, "end": 100.9}],
+                    5, 0, "Arial", False, True)
+            self.assertEqual(reframe.call_args.kwargs["speech_words"], [
+                {"word": "hello", "start": 0.5, "end": 0.9}])
+
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg is required")
 class MediaProcessingTests(unittest.TestCase):

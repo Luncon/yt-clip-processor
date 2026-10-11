@@ -61,8 +61,14 @@ predictions, not measured short-form performance. Use `--min-auto-score` to
 adjust the quality threshold; the default is 65.
 
 Vertical framing uses separate top and bottom panes for sustained two-person
-shots, with room around each face for profile views. Wide shots use a larger
-centered view of the source frame.
+shots, with room around each face for profile views. It detects straight panel
+dividers and camera cuts so crops stay with the right panel and reset when the
+shot changes. When speech timing and repeated mouth movement clearly indicate
+one speaker, that pane grows slightly; uncertain shots keep equal panes.
+Screen captures with a small lower-corner camera use a content pane above a
+smaller camera pane, preserving the screen region beside chat when detected.
+The screen is fitted whole over a soft background, so dense text may still be
+small on a phone. Wide shots use a larger centered view of the source frame.
 
 ## Monitor source uploads
 

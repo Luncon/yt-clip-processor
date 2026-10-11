@@ -50,7 +50,8 @@ def _smooth_crop_path(keyframes: dict, total_frames: int, default_x: int) -> lis
     return result
 
 
-def _smooth_mode_sequence(keyframe_modes: dict, mode_thresholds: dict) -> dict:
+def _smooth_mode_sequence(keyframe_modes: dict, mode_thresholds: dict,
+                          cuts: set = None) -> dict:
     """
     Apply hysteresis to mode transitions to prevent rapid flickering.
     A switch TO any given mode only fires after `mode_thresholds[mode]`
@@ -68,6 +69,17 @@ def _smooth_mode_sequence(keyframe_modes: dict, mode_thresholds: dict) -> dict:
     keys = sorted(keyframe_modes.keys())
     if not keys:
         return {}
+    if cuts:
+        result = {}
+        first = 0
+        for index, key in enumerate(keys):
+            if key in cuts and index > first:
+                part = {k: keyframe_modes[k] for k in keys[first:index]}
+                result.update(_smooth_mode_sequence(part, mode_thresholds))
+                first = index
+        part = {k: keyframe_modes[k] for k in keys[first:]}
+        result.update(_smooth_mode_sequence(part, mode_thresholds))
+        return result
 
     raw_seq  = [keyframe_modes[k] for k in keys]
     result   = {}
@@ -101,6 +113,12 @@ def _smooth_mode_sequence(keyframe_modes: dict, mode_thresholds: dict) -> dict:
                 window = threshold + TOLERANCE
                 recent = raw_seq[max(0, idx - window + 1): idx + 1]
                 if recent.count(raw) >= threshold:
+                    if raw == 'screen':
+                        first = max(0, idx - window + 1)
+                        while first < idx and raw_seq[first] != 'screen':
+                            first += 1
+                        for earlier in keys[first:idx]:
+                            result[earlier] = 'screen'
                     if cur_mode == 'wide':
                         first = idx
                         while first > 0 and raw_seq[first - 1] == raw:
@@ -113,7 +131,7 @@ def _smooth_mode_sequence(keyframe_modes: dict, mode_thresholds: dict) -> dict:
     return result
 
 
-def _build_scenes(smoothed_modes: dict, total_frames: int) -> list:
+def _build_scenes(smoothed_modes: dict, total_frames: int, cuts: set = None) -> list:
     """Convert per-keyframe modes into a list of scene dicts."""
     keys   = sorted(smoothed_modes.keys())
     scenes = []
@@ -123,8 +141,9 @@ def _build_scenes(smoothed_modes: dict, total_frames: int) -> list:
     cur_mode  = smoothed_modes[keys[0]]
     cur_start = keys[0]
 
+    cuts = cuts or set()
     for k in keys[1:]:
-        if smoothed_modes[k] != cur_mode:
+        if smoothed_modes[k] != cur_mode or k in cuts:
             scenes.append({'start': cur_start, 'end': k, 'mode': cur_mode})
             cur_mode  = smoothed_modes[k]
             cur_start = k

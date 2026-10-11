@@ -1,6 +1,8 @@
 """Faces for vertical video. """
 
 from pathlib import Path
+from .layout import (detect_panel_dividers, infer_active_speakers,
+                     is_camera_cut, mouth_motion)
 from .media import _get_video_codec, _run_ffmpeg
 from .scenes import _build_scenes, _smooth_mode_sequence
 
@@ -83,37 +85,64 @@ class _FaceDetectorCascade:
     def __init__(self):
         self.short = _create_mediapipe_face_detector()
         self.full = None
+        self.corner = None
+        self.corner_unavailable = False
         self.full_unavailable = False
 
-    def detect(self, frame, timestamp_ms: int, src_w: int, src_h: int) -> list:
+    def detect(self, frame, timestamp_ms: int, src_w: int, src_h: int,
+               panel: dict = None) -> list:
         detected = _detect_faces_mediapipe(
             self.short, frame, timestamp_ms, src_w, src_h)
-        if detected:
-            return detected
+        if not detected and not self.full_unavailable:
+            if self.full is None:
+                try:
+                    self.full = _create_mediapipe_face_detector(full_range=True)
+                except Exception as exc:
+                    self.full_unavailable = True
+                    print(f"    ⚠️  Full-range face model unavailable: {exc}")
+            if self.full is not None:
+                candidates = _detect_faces_mediapipe(
+                    self.full, frame, timestamp_ms, src_w, src_h)
+                detected = [
+                    face for face in candidates
+                    if face[3] / max(src_h, 1) >= MIN_FULL_RANGE_FACE_HEIGHT_RATIO
+                    and abs(face[0] - src_w / 2) / max(src_w / 2, 1)
+                    <= MAX_FULL_RANGE_OFFCENTER_RATIO
+                ]
 
-        if self.full_unavailable:
-            return []
-        if self.full is None:
-            try:
-                self.full = _create_mediapipe_face_detector(full_range=True)
-            except Exception as exc:
-                self.full_unavailable = True
-                print(f"    ⚠️  Full-range face model unavailable: {exc}")
-                return []
-
-        candidates = _detect_faces_mediapipe(
-            self.full, frame, timestamp_ms, src_w, src_h)
-        return [
-            face for face in candidates
-            if face[3] / max(src_h, 1) >= MIN_FULL_RANGE_FACE_HEIGHT_RATIO
-            and abs(face[0] - src_w / 2) / max(src_w / 2, 1)
-            <= MAX_FULL_RANGE_OFFCENTER_RATIO
-        ]
+        divider = (panel or {}).get('x')
+        if (not self.corner_unavailable and divider is not None
+                and (divider > src_w * 0.55 or divider < src_w * 0.45)):
+            x0 = round(src_w * (0.52 if divider > src_w / 2 else 0))
+            x1 = src_w if divider > src_w / 2 else round(src_w * 0.48)
+            y0 = round(src_h * 0.50)
+            region = frame[y0:, x0:x1]
+            if self.corner is None:
+                try:
+                    self.corner = _create_mediapipe_face_detector()
+                except Exception as exc:
+                    self.corner_unavailable = True
+                    print(f"    ⚠️  Corner face detector unavailable: {exc}")
+            corners = (_detect_faces_mediapipe(
+                self.corner, region, timestamp_ms, x1 - x0, src_h - y0)
+                if self.corner is not None else [])
+            for cx, cy, width, height in corners:
+                candidate = (cx + x0, cy + y0, width, height)
+                if (_is_reaction_face(candidate, src_w, src_h)
+                        and all(abs(candidate[0] - f[0]) > max(candidate[2], f[2]) * 0.5
+                                or abs(candidate[1] - f[1]) > max(candidate[3], f[3]) * 0.5
+                                for f in detected)):
+                    detected.append(candidate)
+                    break
+        detected.sort(key=lambda face: face[2] * face[3], reverse=True)
+        return detected[:2]
 
     def close(self):
         self.short.close()
         if self.full is not None:
             self.full.close()
+        if self.corner is not None:
+            self.corner.close()
 
 
 def _detect_faces_mediapipe(
@@ -307,12 +336,22 @@ def _is_reaction_face(face_box: tuple, src_w: int, src_h: int) -> bool:
 
 
 def _classify_keyframe_mode(faces: dict, src_w: int, src_h: int,
-                            allowed_modes: set = None) -> str:
+                            allowed_modes: set = None, panel: dict = None) -> str:
     """Choose the crop layout for a sampled frame."""
     if allowed_modes is None:
         allowed_modes = {'single', 'dual', 'reaction'}
     if not faces:
         return 'wide'
+    divider = (panel or {}).get('x')
+    if 'reaction' in allowed_modes:
+        for face in faces.values():
+            if (_is_reaction_face(face, src_w, src_h)
+                    and face[1] > src_h * 0.55
+                    and (len(faces) == 1
+                         or (divider is not None
+                             and ((face[0] > divider and divider > src_w * 0.55)
+                                  or (face[0] < divider and divider < src_w * 0.45))))):
+                return 'screen'
     if len(faces) == 2 and 'dual' in allowed_modes:
         return 'dual'
     if len(faces) == 1 and 'reaction' in allowed_modes and _is_reaction_face(faces[0], src_w, src_h):
@@ -320,7 +359,8 @@ def _classify_keyframe_mode(faces: dict, src_w: int, src_h: int,
     return 'single'
 
 
-def analyse_faces(video_path: Path, sample_every: int = 14, allowed_modes: set = None) -> dict:
+def analyse_faces(video_path: Path, sample_every: int = 14, allowed_modes: set = None,
+                  speech_words: list = None) -> dict:
     """
     Analyse faces per keyframe with stable identity tracking.
     Uses X-position clustering to assign consistent face IDs (left/right)
@@ -351,6 +391,12 @@ def analyse_faces(video_path: Path, sample_every: int = 14, allowed_modes: set =
     # not add target-switch delays or carry-forward boxes. Dual/reaction scene
     # detection therefore behaves exactly as it did before the detector swap.
     raw_faces = {}
+    panel_data = {}
+    camera_cuts = set()
+    previous_sample = None
+    motion_reference = None
+    motion_scores = {}
+    motion_lag = max(1, round(fps * 0.20))
     cap = cv2.VideoCapture(str(video_path))
     frame_idx = 0
 
@@ -359,9 +405,18 @@ def analyse_faces(video_path: Path, sample_every: int = 14, allowed_modes: set =
         if not ret:
             break
 
+        if (frame_idx + motion_lag) % sample_every == 0:
+            motion_reference = cv2.cvtColor(
+                cv2.resize(frame, (320, 180)), cv2.COLOR_BGR2GRAY)
+
         if frame_idx % sample_every == 0:
             timestamp_ms = int(round(frame_idx * 1000 / fps))
-            detected = detector.detect(frame, timestamp_ms, src_w, src_h)
+            panel_data[frame_idx] = detect_panel_dividers(frame)
+            if previous_sample is not None and is_camera_cut(previous_sample, frame):
+                camera_cuts.add(frame_idx)
+            previous_sample = frame.copy()
+            detected = detector.detect(frame, timestamp_ms, src_w, src_h,
+                                       panel=panel_data[frame_idx])
 
             # Duplicate guard: only collapse two boxes down to one when they
             # substantially OVERLAP (IoU) — that's the actual signature of
@@ -396,6 +451,12 @@ def analyse_faces(video_path: Path, sample_every: int = 14, allowed_modes: set =
                     detected = detected[:1]
 
             raw_faces[frame_idx] = detected
+            gray = cv2.cvtColor(cv2.resize(frame, (320, 180)), cv2.COLOR_BGR2GRAY)
+            ordered = sorted(detected, key=lambda face: face[0])
+            motion_scores[frame_idx] = {
+                fid: mouth_motion(motion_reference, gray, face, src_w, src_h)
+                for fid, face in enumerate(ordered)
+            } if motion_reference is not None else {}
 
         frame_idx += 1
 
@@ -475,18 +536,20 @@ def analyse_faces(video_path: Path, sample_every: int = 14, allowed_modes: set =
     keyframe_modes = {}
     for fidx in sorted(face_data.keys()):
         keyframe_modes[fidx] = _classify_keyframe_mode(
-            face_data[fidx], src_w, src_h, allowed_modes)
+            face_data[fidx], src_w, src_h, allowed_modes, panel_data[fidx])
 
     mode_thresholds = {
         'dual':     MIN_DUAL_FRAMES,
         'single':   MIN_SINGLE_FRAMES,
         'reaction': MIN_REACTION_FRAMES,
+        'screen':   MIN_REACTION_FRAMES,
         'wide':     2,
     }
-    smoothed_modes = _smooth_mode_sequence(keyframe_modes, mode_thresholds)
+    smoothed_modes = _smooth_mode_sequence(keyframe_modes, mode_thresholds,
+                                            cuts=camera_cuts)
 
     # Build scene list: [{start_frame, end_frame, mode}]
-    scenes = _build_scenes(smoothed_modes, total)
+    scenes = _build_scenes(smoothed_modes, total, cuts=camera_cuts)
 
     print(f"    Face analysis: {dual_count}/{total_sampled} dual frames ({dual_ratio:.0%})")
     print(f"    Detected {len(scenes)} scene(s): " +
@@ -501,4 +564,6 @@ def analyse_faces(video_path: Path, sample_every: int = 14, allowed_modes: set =
         'src_h':        src_h,
         'total_frames': total,
         'sample_every': sample_every,
+        'panels':       panel_data,
+        'active_speakers': infer_active_speakers(motion_scores, speech_words or [], fps),
     }

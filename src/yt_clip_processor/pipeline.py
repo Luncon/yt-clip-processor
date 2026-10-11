@@ -44,6 +44,13 @@ def process_hook_segment(
     start_sec = hook["start_sec"]
     end_sec   = hook["end_sec"]
     actual    = round(end_sec - start_sec, 2)
+    seg_words = [
+        {"word": w["word"],
+         "start": round(w["start"] - start_sec, 3),
+         "end": round(w["end"] - start_sec, 3)}
+        for w in all_words
+        if w["start"] >= start_sec - 0.1 and w["end"] <= end_sec + 0.5
+    ]
 
     # ── 1. Trim raw segment ──
     raw_seg = seg_dir / "raw.mp4"
@@ -65,7 +72,8 @@ def process_hook_segment(
 
     # ── 2. Reframe to vertical ──
     if not no_vertical:
-        working, face_info = reframe_to_vertical(raw_seg, seg_dir, allowed_modes=allowed_modes)
+        working, face_info = reframe_to_vertical(
+            raw_seg, seg_dir, allowed_modes=allowed_modes, speech_words=seg_words)
         if face_info:
             _fps = face_info.get("fps", 25)
             for s in face_info.get("scenes", []):
@@ -77,14 +85,6 @@ def process_hook_segment(
         scenes_for_subs = None
 
     # ── 3. Slice words to this time window and re-zero timestamps ──
-    seg_words = [
-        {"word": w["word"],
-         "start": round(w["start"] - start_sec, 3),
-         "end":   round(w["end"]   - start_sec, 3)}
-        for w in all_words
-        if w["start"] >= start_sec - 0.1 and w["end"] <= end_sec + 0.5
-    ]
-
     if not no_burn_subs and seg_words:
         srt_path        = seg_dir / "seg.srt"
         words_json_path = seg_dir / "seg.words.json"
@@ -269,7 +269,7 @@ def _run_uniform(args, video_path, work_dir, clips_dir, allowed_modes, font):
     working_video = video_path
     if not args.no_vertical:
         working_video, face_info = reframe_to_vertical(
-            video_path, work_dir, allowed_modes=allowed_modes
+            video_path, work_dir, allowed_modes=allowed_modes, speech_words=words
         )
         if face_info:
             fps = face_info.get("fps", 25)

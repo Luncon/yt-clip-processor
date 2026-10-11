@@ -211,6 +211,84 @@ def _dual_crop_box(face: tuple, src_w: int, src_h: int) -> tuple:
     return x1, y1, x1 + box_w, y1 + box_h
 
 
+def _dual_scene_box(faces: list, src_w: int, src_h: int,
+                    x_bounds: tuple = None, y_bounds: tuple = None) -> tuple:
+    """Cover every sampled position of one speaker within its visual panel."""
+    left, right = x_bounds or (0, src_w)
+    top, bottom = y_bounds or (0, src_h)
+    if not faces:
+        return left, top, right, bottom
+    min_x = min(cx - w / 2 for cx, _, w, _ in faces)
+    max_x = max(cx + w / 2 for cx, _, w, _ in faces)
+    min_y = min(cy - h / 2 for _, cy, _, h in faces)
+    max_y = max(cy + h / 2 for _, cy, _, h in faces)
+    if min_x < left or max_x > right:
+        # A detected divider crossing the subject is less trustworthy than
+        # the visible face; allow the crop to cross it in this scene.
+        left, right = 0, src_w
+    if min_y < top or max_y > bottom:
+        top, bottom = 0, src_h
+    margin_x = max(w for _, _, w, _ in faces) * 0.15
+    margin_y = max(h for _, _, _, h in faces) * 0.15
+    # A full panel is the safe fallback if movement exceeds a fixed crop.
+    width = min(right - left, max(round(src_w * 0.56), round(max_x - min_x + 2 * margin_x)))
+    height = min(bottom - top, max(round(src_h * 0.896), round(max_y - min_y + 2 * margin_y)))
+    center_x = (min_x + max_x) / 2
+    center_y = (min_y + max_y) / 2
+    x1 = max(left, min(round(center_x - width / 2), right - width))
+    y1 = max(top, min(round(center_y - height / 2), bottom - height))
+    box = (x1, y1, x1 + width, y1 + height)
+    if any(cx - w / 2 < box[0] or cx + w / 2 > box[2] or
+           cy - h / 2 < box[1] or cy + h / 2 > box[3]
+           for cx, cy, w, h in faces):
+        return left, top, right, bottom
+    return box
+
+
+def _screen_boxes(face: tuple, src_w: int, src_h: int,
+                  divider: int = None, camera_x: int = None,
+                  camera_y: int = None) -> tuple:
+    """Separate the screen region from a lower corner camera."""
+    cx, cy, _, _ = face
+    on_right = cx > src_w / 2
+    if divider is not None:
+        content = ((0, 0, divider, src_h) if on_right
+                   else (divider, 0, src_w, src_h))
+    else:
+        content = (0, 0, src_w, src_h)
+    fallback_x = round(src_w * (0.60 if on_right else 0.40))
+    x_edge = camera_x if camera_x is not None else fallback_x
+    y_edge = camera_y if camera_y is not None else round(src_h * 0.52)
+    if on_right:
+        x1, x2 = (x_edge, src_w) if x_edge < cx - src_w * 0.05 else (fallback_x, src_w)
+    else:
+        x1, x2 = (0, x_edge) if x_edge > cx + src_w * 0.05 else (0, fallback_x)
+    y1 = y_edge if y_edge < cy - src_h * 0.05 else round(src_h * 0.52)
+    return content, (x1, y1, x2, src_h)
+
+
+def _fit_panel(frame, out_w: int, out_h: int):
+    """Fit a complete panel over a soft fill so text and edges stay visible."""
+    import cv2
+
+    src_h, src_w = frame.shape[:2]
+    background = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+    background = cv2.GaussianBlur(background, (0, 0), sigmaX=24)
+    background = cv2.convertScaleAbs(background, alpha=0.42)
+    scale = min(out_w / src_w, out_h / src_h)
+    width, height = max(1, round(src_w * scale)), max(1, round(src_h * scale))
+    foreground = cv2.resize(frame, (width, height), interpolation=cv2.INTER_LINEAR)
+    x, y = (out_w - width) // 2, (out_h - height) // 2
+    background[y:y + height, x:x + width] = foreground
+    return background
+
+
+def _next_split_ratio(current: float, speaker: int = None) -> float:
+    """Ease a confident speaker toward a modestly larger pane."""
+    target = 0.55 if speaker == 0 else 0.45 if speaker == 1 else 0.5
+    return current + max(-0.01, min(0.01, target - current))
+
+
 def _fit_centered_wide(frame, out_w: int, out_h: int):
     """Enlarge a wide shot's center to occupy most of the portrait canvas."""
     import cv2
@@ -239,11 +317,14 @@ def render_split_screen(
     src_h: int,
     sample_every: int,
     scenes: list = None,
+    panels: dict = None,
+    active_speakers: dict = None,
 ) -> bool:
     """
     Render with scene-aware mode switching:
     - Dual scenes:     stable split-screen (left face top, right face bottom)
     - Reaction scenes: split-screen (zoomed face bubble top, content bottom)
+    - Screen scenes:   full content above the lower-corner camera
     - Single scenes:   full-frame face tracking
     - Wide scenes:     enlarge the centered source view when faces are absent
     Faces are identified by X position (left=0, right=1) so they never swap.
@@ -303,7 +384,20 @@ def render_split_screen(
     CROP_W_HALF = src_w // 2
     CROP_H_HALF = int(src_h * 0.8)
 
-    anchor_boxes = {}   # scene_start_frame -> {0: (x1,y1,x2,y2), 1: (x1,y1,x2,y2)}
+    anchor_boxes = {}   # scene_start_frame -> {0: box, 1: box}
+    stacked_panel_scenes = set()
+    panels = panels or {}
+
+    def _scene_panel_value(scene, field):
+        values = [panel[field] for kf, panel in panels.items()
+                  if scene['start'] <= kf < scene['end'] and panel.get(field) is not None]
+        count = sum(scene['start'] <= kf < scene['end'] for kf in face_data)
+        if len(values) < max(2, round(count * 0.6)):
+            return None
+        values.sort()
+        median = values[len(values) // 2]
+        span = src_h if field.endswith('y') else src_w
+        return median if values[-1] - values[0] < span * 0.06 else None
 
     def _make_box(cx, cy, box_w, box_h, x_min, x_max):
         """Build a clamped crop box centered on (cx, cy) within [x_min, x_max]."""
@@ -320,30 +414,59 @@ def render_split_screen(
 
     if scenes:
         for s in scenes:
-            if s['mode'] not in ('dual', 'reaction'):
+            if s['mode'] not in ('dual', 'reaction', 'screen'):
                 continue
 
             if s['mode'] == 'dual':
-                # Find first keyframe in this scene with two faces
-                anchor = None
-                for kf in sorted(face_data.keys()):
-                    if kf < s['start'] or kf >= s['end']:
-                        continue
-                    faces = face_data[kf]
-                    if len(faces) == 2:
-                        # Let both crops cross the midpoint so profiles stay visible.
-                        box0 = _dual_crop_box(faces[0], src_w, src_h)
-                        box1 = _dual_crop_box(faces[1], src_w, src_h)
-                        anchor = {0: box0, 1: box1}
-                        print(f"    📦  Anchor boxes set at frame {kf}: "
-                              f"face0={box0[0]}-{box0[2]}px  face1={box1[0]}-{box1[2]}px")
-                        break
-                if anchor is None:
+                samples = {
+                    fid: [faces[fid] for kf, faces in face_data.items()
+                          if s['start'] <= kf < s['end'] and len(faces) == 2]
+                    for fid in (0, 1)
+                }
+                divider = _scene_panel_value(s, 'x')
+                horizontal = _scene_panel_value(s, 'y')
+                if samples[0] and samples[1]:
+                    separated_x = (divider is not None and
+                                   samples[0][0][0] < divider < samples[1][0][0])
+                    separated_y = (horizontal is not None and
+                                   (samples[0][0][1] - horizontal) *
+                                   (samples[1][0][1] - horizontal) < 0)
+                    left_bounds = (0, divider) if separated_x else None
+                    right_bounds = (divider, src_w) if separated_x else None
+                    upper_bounds = lower_bounds = None
+                    if separated_y and not separated_x:
+                        stacked_panel_scenes.add(s['start'])
+                        upper_bounds = ((0, horizontal) if samples[0][0][1] < horizontal
+                                        else (horizontal, src_h))
+                        lower_bounds = ((0, horizontal) if samples[1][0][1] < horizontal
+                                        else (horizontal, src_h))
+                    anchor = {
+                        0: _dual_scene_box(samples[0], src_w, src_h,
+                                           left_bounds, upper_bounds),
+                        1: _dual_scene_box(samples[1], src_w, src_h,
+                                           right_bounds, lower_bounds),
+                    }
+                else:
                     # No clean dual frame — use left/right midpoints as fallback
                     box0 = _dual_crop_box((src_w // 4, src_h // 2, 0, 0), src_w, src_h)
                     box1 = _dual_crop_box((3 * src_w // 4, src_h // 2, 0, 0), src_w, src_h)
                     anchor = {0: box0, 1: box1}
-                    print(f"    📦  Anchor boxes: no dual frame found, using midpoint fallback")
+
+            elif s['mode'] == 'screen':
+                corner_faces = [face for kf, faces in face_data.items()
+                                if s['start'] <= kf < s['end']
+                                for face in faces.values()
+                                if _is_reaction_face(face, src_w, src_h)]
+                if corner_faces:
+                    face = sorted(corner_faces, key=lambda f: f[3])[len(corner_faces) // 2]
+                    anchor = dict(zip((0, 1), _screen_boxes(
+                        face, src_w, src_h,
+                        _scene_panel_value(s, 'x'),
+                        _scene_panel_value(s, 'camera_x'),
+                        _scene_panel_value(s, 'camera_y'))))
+                else:
+                    anchor = {0: (0, 0, src_w, src_h),
+                              1: (0, 0, src_w, src_h)}
 
             else:   # reaction
                 # Find first keyframe in this scene with a reaction-classified face
@@ -392,6 +515,7 @@ def render_split_screen(
     cap  = cv2.VideoCapture(str(video_path))
 
     frame_idx    = 0
+    split_ratio = 0.5
     report_every = max(1, int(fps * 10))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
@@ -406,7 +530,7 @@ def render_split_screen(
         kf   = (frame_idx // sample_every) * sample_every
         mode = scene_mode_per_frame.get(kf, 'single')
 
-        if mode in ('dual', 'reaction'):
+        if mode in ('dual', 'reaction', 'screen'):
             # ── SPLIT SCREEN: fixed anchor box per region, never moves ──
             # 'dual'     → box0/box1 are the two people (top/bottom)
             # 'reaction' → box0 is the zoomed face bubble, box1 is the content
@@ -431,8 +555,23 @@ def render_split_screen(
             top_crop = _crop_box(frame, box0)
             bot_crop = _crop_box(frame, box1)
 
-            canvas[0:HALF_H]     = cv2.resize(top_crop, (OUT_W, HALF_H))
-            canvas[HALF_H:OUT_H] = cv2.resize(bot_crop, (OUT_W, HALF_H))
+            if mode == 'screen':
+                content_h = round(OUT_H * 0.70)
+                canvas[:content_h] = _fit_panel(top_crop, OUT_W, content_h)
+                canvas[content_h:] = _fit_panel(bot_crop, OUT_W, OUT_H - content_h)
+            else:
+                focus = (active_speakers or {}).get(kf) if mode == 'dual' else None
+                split_ratio = _next_split_ratio(split_ratio, focus)
+                top_h = round(OUT_H * split_ratio)
+                stacked = any(s['start'] in stacked_panel_scenes
+                              and s['start'] <= frame_idx < s['end']
+                              for s in (scenes or []))
+                if stacked:
+                    canvas[:top_h] = _fit_panel(top_crop, OUT_W, top_h)
+                    canvas[top_h:] = _fit_panel(bot_crop, OUT_W, OUT_H - top_h)
+                else:
+                    canvas[:top_h] = cv2.resize(top_crop, (OUT_W, top_h))
+                    canvas[top_h:] = cv2.resize(bot_crop, (OUT_W, OUT_H - top_h))
 
         elif mode == 'wide':
             canvas = _fit_centered_wide(frame, OUT_W, OUT_H)
