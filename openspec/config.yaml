@@ -1,0 +1,12 @@
+schema: spec-driven
+rules:
+  proposal:
+    - State the user problem, intended outcome, and scope of the change.
+    - Link relevant notes as evidence, but do not promote unverified observations into requirements.
+  specs:
+    - Describe observable behavior with concrete, testable scenarios.
+    - Cover failure behavior when it matters to the capability.
+  design:
+    - Record consequential choices and why they were made.
+  tasks:
+    - Make each task verifiable and include relevant tests or checks.
