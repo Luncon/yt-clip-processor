@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yt-clip-processor"
+version = "0.1.0"
+description = "Turn local or YouTube videos into short subtitled clips"
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+youtube = ["yt-dlp"]
+transcription = ["faster-whisper", "numpy"]
+framing = ["mediapipe", "opencv-python", "numpy", "scipy"]
+titles = ["requests"]
+all = ["yt-dlp", "faster-whisper", "mediapipe", "opencv-python", "numpy", "scipy", "requests"]
+
+[project.scripts]
+yt-clip-processor = "yt_clip_processor.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
