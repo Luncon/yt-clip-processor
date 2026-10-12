@@ -20,6 +20,25 @@ separate extras. The first vertical run downloads a MediaPipe face model.
 Setting `GROQ_API_KEY` enables optional generated clip titles; otherwise
 titles use transcript text.
 
+## Run from this repository
+
+Use this repository folder for both monitoring and processing. With the local
+virtual environment activated, these commands work without installing the
+package:
+
+```sh
+source venv/bin/activate
+PYTHONPATH=src python -m yt_clip_processor.monitor
+PYTHONPATH=src python -m yt_clip_processor --from-monitor \
+  --auto-clips 4 --auto-clip-length 60
+```
+
+The monitor database is `output/source-monitor.sqlite3`, downloaded sources
+are in `output/_cache/`, and completed clips are in `output/clips/`. Existing
+data from the earlier temporary worktrees has been consolidated here. Framing
+test videos are in `output/diagnostics/context-framing-sample/`. All `output/`
+contents stay local and are ignored by Git.
+
 ## Use
 
 ```sh
