@@ -19,23 +19,15 @@ from yt_clip_processor.rendering import _reframe_center_crop
 
 class HookSelectionTests(unittest.TestCase):
     def test_repeated_topics_are_not_selected_twice(self):
-        tokens = "surprising discovery about space travel".split()
-        words = [
-            {"word": tokens[i % len(tokens)], "start": float(i), "end": i + 0.8}
-            for i in range(150)
-        ]
-        with (
-            patch.object(hooks, "_hook_score_chunk", return_value={"score": 80, "signals": {}}),
-            patch.object(hooks, "_is_ad_window", return_value=False),
-            patch.object(hooks, "_score_clip_body", return_value={"body_score": 60, "body_signals": {}}),
-            patch.object(hooks, "_score_standalone_opening", return_value={"score": 60, "reasons": []}),
-            patch.object(hooks, "_score_payoff", return_value={"score": 60, "signals": {}}),
-            patch.object(hooks, "_score_ending", return_value={"score": 60, "reasons": []}),
-        ):
-            selected = hooks.find_hook_clips(words, 3, 25)
-
+        sentence = "We checked every angle and found the missing piece in the process.".split()
+        words = []
+        for index in range(240):
+            start = index * 0.5 + (20 if index >= 120 else 0)
+            words.append({"word": sentence[index % len(sentence)],
+                          "start": start, "end": start + 0.4})
+        selected = hooks.find_hook_clips(words, 3, 50)
         self.assertEqual(len(selected), 1)
-        self.assertNotIn("token_set", selected[0])
+        self.assertNotIn("tokens", selected[0])
 
     def test_uniform_transcription_uses_source_audio_before_reframing(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -51,6 +43,26 @@ class HookSelectionTests(unittest.TestCase):
             ):
                 pipeline._run_uniform(args, source, root, root / "clips", {"single"}, "Arial")
             transcribe.assert_called_once_with(source, args.whisper_model, root)
+
+    def test_hook_segment_passes_relative_speech_times_to_reframing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            source.write_bytes(b"source")
+            destination = root / "clip.mp4"
+
+            def fake_trim(command, quiet):
+                Path(command[-1]).write_bytes(b"segment")
+
+            with (patch.object(pipeline, "_run_ffmpeg", side_effect=fake_trim),
+                  patch.object(pipeline, "reframe_to_vertical",
+                               side_effect=lambda path, *args, **kwargs: (path, None)) as reframe):
+                pipeline.process_hook_segment(
+                    source, {"start_sec": 100, "end_sec": 105}, root / "segment",
+                    destination, [{"word": "hello", "start": 100.5, "end": 100.9}],
+                    5, 0, "Arial", False, True)
+            self.assertEqual(reframe.call_args.kwargs["speech_words"], [
+                {"word": "hello", "start": 0.5, "end": 0.9}])
 
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg is required")

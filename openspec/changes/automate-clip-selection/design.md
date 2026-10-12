@@ -1,0 +1,9 @@
+## Design
+
+Keep the existing processor entry point and rendering pipeline. `--auto-clips N` selects clips; `--hooks N` remains an alias for callers already using it. `--from-monitor` resolves a video URL from the source monitor database before dependency checks, with `--monitor-db` for its location. Require at least two observations and a positive view growth rate for automatic source selection. Compare growth to the median of recent eligible uploads from the same source when a baseline exists; use absolute growth when it does not. Enforce minimum source duration and freshness.
+
+Generate candidate starts at transcript sentence or pause boundaries throughout the video. Select ends at a boundary near the requested length. Score complete clips using observable transcript structure: contextual opening, sustained speech, question/answer or claim/explanation shape, clean ending, and absence of ad reads. Do not use person/topic vocabularies as a gate. Enforce a minimum quality score, avoid overlapping or substantially duplicate clips, and return fewer than requested if necessary. Face detection is a rendering input, not a candidate gate.
+
+When `GROQ_API_KEY` is available, send a bounded shortlist of complete candidate transcripts to a semantic evaluator in batches. Ask it to score standalone clarity, interest, developed point, and misleading context; do not reward names or sensational vocabulary on their own. Validate returned IDs, scores, and reasons before combining them with structural scores. On model failure, fall back to structural scores. No new credential is required, because the project already uses this key for optional titles.
+
+Write `selection.json` beside rendered clips, including ranked decisions and renderer outcome. Candidate scores are predictions, not observed clip performance. Post outcome feedback can calibrate them later.

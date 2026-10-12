@@ -7,13 +7,15 @@ from .rendering import _reframe_center_crop, _render_with_tracking, render_split
 from .scenes import _smooth_crop_path
 
 
-def reframe_to_vertical(video_path: Path, output_dir: Path, allowed_modes: set = None):
+def reframe_to_vertical(video_path: Path, output_dir: Path, allowed_modes: set = None,
+                        speech_words: list = None):
     """
     Smart reframe to 9:16 vertical.
     Returns (vertical_path, face_info). face_info is None if already cached.
     - 2 faces consistently present -> split-screen mode (top/bottom halves)
     - 1 face -> single face tracking mode
-    - sustained 0 faces -> fit the complete source frame on a vertical canvas
+    - screen capture with lower corner camera -> content and camera panes
+    - sustained 0 faces -> enlarged centered wide view
     """
     vertical_path = output_dir / (video_path.stem + "_vertical.mp4")
 
@@ -90,21 +92,26 @@ def reframe_to_vertical(video_path: Path, output_dir: Path, allowed_modes: set =
     print(f"    Scene types searched: {', '.join(sorted(_modes_for_log))}")
 
     # ── Analyse faces ──
-    face_info = analyse_faces(working_path, sample_every=sample_every, allowed_modes=allowed_modes)
+    face_info = analyse_faces(working_path, sample_every=sample_every,
+                              allowed_modes=allowed_modes, speech_words=speech_words)
 
     has_dual     = any(s["mode"] == "dual"     for s in face_info.get("scenes", []))
     has_reaction = any(s["mode"] == "reaction" for s in face_info.get("scenes", []))
+    has_screen   = any(s["mode"] == "screen"   for s in face_info.get("scenes", []))
     has_wide     = any(s["mode"] == "wide"     for s in face_info.get("scenes", []))
 
-    if has_dual or has_reaction or has_wide:
+    if has_dual or has_reaction or has_screen or has_wide:
         # Scene-aware render switches between split-screen, reaction, face tracking, and wide shots.
-        kinds = " + ".join(k for k, v in (("dual", has_dual), ("reaction", has_reaction), ("wide", has_wide)) if v)
+        kinds = " + ".join(k for k, v in (("dual", has_dual), ("reaction", has_reaction),
+                                         ("screen", has_screen), ("wide", has_wide)) if v)
         print(f"    \U0001f465  {kinds.capitalize()} scene(s) detected \u2014 scene-aware render...")
         success = render_split_screen(
             working_path, vertical_path,
             face_info["face_data"],
             fps, src_w, src_h, sample_every,
             scenes=face_info["scenes"],
+            panels=face_info.get("panels"),
+            active_speakers=face_info.get("active_speakers"),
         )
         if success:
             print(f"\u2705  Scene-aware vertical video \u279c {vertical_path.name}")

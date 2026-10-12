@@ -45,6 +45,8 @@ def _write_karaoke_ass(words_json_path: Path, ass_path: Path, font: str = "Arial
             s0 = s.get("start_sec", s.get("start", 0))
             s1 = s.get("end_sec",   s.get("end", float("inf")))
             if s0 <= t < s1:
+                if s.get("mode") == "screen":
+                    return "Screen"
                 return "Split" if s.get("mode") in ("dual", "reaction") else "Default"
         return "Default"
 
@@ -86,6 +88,7 @@ def _write_karaoke_ass(words_json_path: Path, ass_path: Path, font: str = "Arial
         f"{style_fmt}"
         + _style_line("Default", 2, 280)   # ~1/4 up from bottom, above TikTok caption
         + _style_line("Split",   5, 0)     # middle-center (split-screen)
+        + _style_line("Screen",  2, 440)   # just above the corner camera pane
         + "\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
@@ -226,6 +229,8 @@ def _srt_to_ass(srt_path: Path, ass_path: Path, font: str = "Arial",
             s_start = s.get("start_sec", s.get("start", 0))
             s_end   = s.get("end_sec",   s.get("end",   float("inf")))
             if s_start <= start_sec < s_end:
+                if s.get("mode") == "screen":
+                    return "Screen"
                 return "Split" if s.get("mode") in ("dual", "reaction") else "Default"
         return "Default"
 
@@ -248,6 +253,8 @@ def _srt_to_ass(srt_path: Path, ass_path: Path, font: str = "Arial",
         # Split style — middle-center (alignment 5), no margin
         f"Style: Split,{font_name},35,&H00FFFFFF,&H00000000,&H00000000,"
         f"0,0,0,0,100,100,0,0,1,2,1,5,0,0,0,1\n"
+        f"Style: Screen,{font_name},35,&H00FFFFFF,&H00000000,&H00000000,"
+        f"0,0,0,0,100,100,0,0,1,2,1,2,0,0,440,1\n"
         "\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
@@ -304,7 +311,7 @@ def burn_subtitles(video_path: Path, srt_path: Path, output_dir: Path,
         print(f"\u23e9  Subtitled video already exists \u279c {safe_out.name}")
         return safe_out
 
-    has_split = scenes and any(s.get("mode") in ("dual", "reaction") for s in scenes)
+    has_split = scenes and any(s.get("mode") in ("dual", "reaction", "screen") for s in scenes)
 
     # Prefer karaoke ASS if per-word JSON is available (written by transcribe_video)
     words_json_path = srt_path.with_suffix(".words.json")
